@@ -896,6 +896,14 @@ func modelFromManifest(n model.Name, mf *manifest.Manifest) (*Model, error) {
 		}
 	}
 
+	// Local fork: OLLAMA_NATIVE_TEMPLATE=1 makes Ollama use the model's own GGUF
+	// chat template (via llama-server) instead of its built-in renderer/parser.
+	if os.Getenv("OLLAMA_NATIVE_TEMPLATE") == "1" && ggufChatTemplate != "" && m.metadata.String("decision.type") == "" {
+		m.Config.Renderer = ""
+		m.Config.Parser = ""
+		m.HasGoTemplate = false
+	}
+
 	ggufCaps := chatTemplateCapabilities(nil, ggufChatTemplate)
 	goCaps := goTemplateCapabilities(m.Template)
 	usesHarmony := m.Template != nil && shouldUseHarmony(m)
