@@ -350,14 +350,8 @@ func newModel(root *model.Root, targetModel model.Model, ctxLayerNorm bool) (*Mo
 		ctxLayerNorm: ctxLayerNorm,
 		tensorPrefix: tensorPrefix,
 		Layers:       make([]*Layer, cfg.NumHiddenLayers),
-		TensorQuant:  root.AllTensorQuant(),
 	}
-	if qt := root.QuantType(); qt != "" {
-		m.QuantGroupSize, m.QuantBits, m.QuantMode = model.QuantizationParams(qt)
-		if gs := root.GroupSize(); gs > 0 {
-			m.QuantGroupSize = gs
-		}
-	}
+	m.QuantGroupSize, m.QuantBits, m.QuantMode, m.TensorQuant = root.Quantization()
 	return m, nil
 }
 
@@ -626,7 +620,7 @@ func (m *Model) Unembed(x *mlx.Array) *mlx.Array {
 // come from the block only. Either input may be absent: with no block the
 // call just extends the context, with no context the block drafts from
 // whatever is already cached.
-func (m *Model) Forward(b *batch.Batch, _, draftCaches []cache.Cache) (hidden, auxHidden *mlx.Array) {
+func (m *Model) Forward(b *batch.Batch, _, draftCaches []cache.Layer) (hidden, auxHidden *mlx.Array) {
 	kv := draftCaches
 
 	var hctx *mlx.Array
@@ -683,7 +677,7 @@ func (m *Model) Forward(b *batch.Batch, _, draftCaches []cache.Cache) (hidden, a
 	return hidden, hidden
 }
 
-func (l *Layer) Forward(x, ctxK, ctxV *mlx.Array, c cache.Cache, bb *batch.Batch, positions *mlx.Array, mask nn.AttentionMask, B, L int32, cfg *Config) *mlx.Array {
+func (l *Layer) Forward(x, ctxK, ctxV *mlx.Array, c cache.Layer, bb *batch.Batch, positions *mlx.Array, mask nn.AttentionMask, B, L int32, cfg *Config) *mlx.Array {
 	h, kernel := l.AttentionConv.prepare(l.InputNorm.Forward(x, cfg.RMSNormEps))
 	h = l.Attention.Forward(h, ctxK, ctxV, c, bb, positions, mask, B, L, cfg)
 	x = x.Add(l.AttentionConv.finish(h, kernel))
@@ -715,7 +709,7 @@ func (a *Attention) splitKV(kv *mlx.Array, B, L int32, cfg *Config) (k, v *mlx.A
 	return k, v
 }
 
-func (a *Attention) Forward(x, ctxK, ctxV *mlx.Array, c cache.Cache, bb *batch.Batch, positions *mlx.Array, mask nn.AttentionMask, B, L int32, cfg *Config) *mlx.Array {
+func (a *Attention) Forward(x, ctxK, ctxV *mlx.Array, c cache.Layer, bb *batch.Batch, positions *mlx.Array, mask nn.AttentionMask, B, L int32, cfg *Config) *mlx.Array {
 	q := mlx.Reshape(a.QProj.Forward(x), B, L, cfg.NumAttentionHeads, cfg.HeadDim)
 	k, v := a.splitKV(a.KVProj.Forward(x), B, L, cfg)
 
