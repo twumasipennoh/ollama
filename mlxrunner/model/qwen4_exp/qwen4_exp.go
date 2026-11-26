@@ -56,25 +56,11 @@ func NewModel(root *model.Root) (model.Model, error) {
 		return nil, err
 	}
 
-	tokenizerData, err := root.Manifest.ReadConfig("tokenizer.json")
+	tok, err := root.LoadTokenizer(configData)
 	if err != nil {
-		return nil, fmt.Errorf("load tokenizer: %w", err)
+		return nil, err
 	}
-	tokenizerConfig := &tokenizer.TokenizerConfig{ConfigJSON: configData}
-	if data, err := root.Manifest.ReadConfig("generation_config.json"); err == nil {
-		tokenizerConfig.GenerationConfigJSON = data
-	}
-	if data, err := root.Manifest.ReadConfig("tokenizer_config.json"); err == nil {
-		tokenizerConfig.TokenizerConfigJSON = data
-	}
-	tok, err := tokenizer.LoadFromBytesWithConfig(tokenizerData, tokenizerConfig)
-	if err != nil {
-		return nil, fmt.Errorf("parse tokenizer: %w", err)
-	}
-	group, bits, mode := model.QuantizationParams(root.QuantType())
-	if root.GroupSize() > 0 {
-		group = root.GroupSize()
-	}
+	group, bits, mode, tensorQuant := root.Quantization()
 	hostPLE, err := openHostPLETables(root, &cfg)
 	if err != nil {
 		return nil, fmt.Errorf("open host-backed PLE: %w", err)
@@ -86,7 +72,7 @@ func NewModel(root *model.Root) (model.Model, error) {
 		quantBits:   bits,
 		quantGroup:  group,
 		quantMode:   mode,
-		tensorQuant: root.AllTensorQuant(),
+		tensorQuant: tensorQuant,
 		configData:  configData,
 		hostPLE:     hostPLE,
 	}, nil
@@ -162,7 +148,7 @@ func (m *Model) NewCaches() []cache.Cache {
 	return caches
 }
 
-func (m *Model) Forward(b *batch.Batch, caches []cache.Cache) (*mlx.Array, *mlx.Array) {
+func (m *Model) Forward(b *batch.Batch, caches []cache.Layer) (*mlx.Array, *mlx.Array) {
 	// The runner may append draft caches; only the target's slots belong here.
 	if len(caches) != 0 && len(caches) < m.numCaches {
 		panic(fmt.Sprintf("Qwen cache count = %d, need at least %d", len(caches), m.numCaches))
@@ -181,16 +167,17 @@ func (m *Model) Forward(b *batch.Batch, caches []cache.Cache) (*mlx.Array, *mlx.
 
 	for i, layer := range m.Layers {
 		if layer.PLE != nil {
-			var tokens *engramCache
+			var tokens engramState
 			if len(caches) > 0 {
-				tokens = caches[layer.pleCache].(*engramCache)
+				tokens = caches[layer.pleCache].(engramState)
 			} else {
-				tokens = layer.PLE.NewCache(m.Config)
-				defer tokens.Free()
+				temporary := layer.PLE.NewCache(m.Config)
+				defer temporary.Free()
+				tokens = temporary
 			}
 			hidden = mlx.Add(hidden, layer.PLE.Forward(hidden, b, tokens, m.Config))
 		}
-		var c, side cache.Cache
+		var c, side cache.Layer
 		if len(caches) > 0 {
 			c = caches[i]
 			if layer.Attention != nil {
@@ -272,7 +259,7 @@ func (m *Model) loadLayer(linears model.LinearFactory, tensors map[string]*mlx.A
 	return l, nil
 }
 
-func (l *Layer) Forward(x *mlx.Array, b *batch.Batch, c, side cache.Cache, ropePositions *mlx.Array, cfg *Config) *mlx.Array {
+func (l *Layer) Forward(x *mlx.Array, b *batch.Batch, c, side cache.Layer, ropePositions *mlx.Array, cfg *Config) *mlx.Array {
 	branch, state := l.AttentionConnection.Prepare(x, cfg)
 	if l.Linear != nil {
 		branch = l.Linear.Forward(branch, b, c, cfg)
